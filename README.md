@@ -1,5 +1,5 @@
 
-MUSIC TOOLKIT FOR FUZE (1.0.00)
+FUZE MUSIC TOOLKIT (1.0.10)
 -
 
 OVERVIEW
@@ -71,7 +71,7 @@ Parameters can be automated, meaning that they can be set to change over time, b
 
 The **.rate** parameter sets the rate in seconds at which interpolation happens. Values lower than **0.0166** are clamped to **0.0166** (which is equivalent to sixty events per second, matching FUZE's max framerate). It is extremely easy to create very dense event data with automation, and extensive automation will substantially increase assembly time when you write the sequence to the file. To reduce assembly time, use high **.rate** values to produce sparser automation when you can.
 
-The **.interpType** parameter sets the shape of the interpolation via an interpolation handle. This is identical to how FUZE's interpolate() function uses interpolation handles. Valid handles are **constant**, **linear**, **ease_in**, **ease_out**, **ease_in_out**, **expo_in**, **expo_out**, **expo_in_out**, **bounce_in**, **bounce_out**, **bounce_in_out**, **elastic_in**, **elastic_out**, and **elastic_in_out**.
+The **.interpType** parameter sets the shape of the interpolation via an interpolation handle. This is identical to how FUZE's **interpolate()** function uses interpolation handles. Valid handles are **constant**, **linear**, **ease_in**, **ease_out**, **ease_in_out**, **expo_in**, **expo_out**, **expo_in_out**, **bounce_in**, **bounce_out**, **bounce_in_out**, **elastic_in**, **elastic_out**, and **elastic_in_out**.
 
 The **.events** parameter is an array of two boundary events to interpolate between. You cannot interpolate between two different types of event, so the events' **.func** parameters must match. In theory, any other parameter can be interpolated, but not all have been tested and some may exhibit odd behavior (e.g. interpolating **.ch**). The only events that must be interpolated are **.beatPos** and/or **.timePos**: there needs to be a timespan for interpolation to happen, and the second position must be later than the first. Any parameters that you don't want to interpolate should be left the same (or omitted) in the second event.
 
@@ -277,7 +277,9 @@ It is not necessary to force a write at the end of a sequence -- the assembler w
 
 ASSEMBLY
 -
-To assemble an audio sequence, call **assembleAudioSequence(_clipName, _saveAsName, _buildResult)**. This function both assembles a clip and writes it to the file. Its first argument, **_clipName** (a string), is the handle of the clip to assemble, and the second argument, **_saveAsName** (a string), is the name to save the sequence under. The third argument, **_buildResult** (struct), is the return from calling **buildAudio()**.
+To assemble an audio sequence, call **assembleAudioSequence(_clipName, _saveAsName, _buildResult, opt _cullRepeatedEvents)**. This function both assembles a clip and writes it to the file. Its first argument, **_clipName** (a string), is the handle of the clip to assemble, and the second argument, **_saveAsName** (a string), is the name to save the sequence under. The third argument, **_buildResult** (struct), is the return from calling **buildAudio()**.
+
+An optional fourth argument, **_cullRepeatedEvents** (boolean) (default true), determines whether parameter-setting events that don't change the parameter's current values are skipped when writing the sequence to the file. Skipping these events reduces both the length of the file and the number of events that must be processed during playback. The only reason to set this argument to false is to potentially improve the results of setting a playback position via **seekPosInAudioSequence()** (see TRANSPORT CONTROLS).
 
 Typical use:
 
@@ -293,9 +295,9 @@ The assembly process takes some time but only needs to be performed once. After 
 
 STREAMING
 -
-To stream a saved sequence from the file, we first call **initAudioQueue(_name, _file, _timeOffset, _deferLimit)** and store its return in a variable. This function has two required arguments: **_name** (string) is the name of the sequence to load, and **_file** (file handle) is the file to read the sequence from.
+To stream a saved sequence from the file, we first call **initAudioQueue(_name, _file, opt _timeOffset, opt _deferLimit)** and store its return in a variable. This function has two required arguments: **_name** (string) is the name of the sequence to load, and **_file** (file handle) is the file to read the sequence from.
 
-**initAudioQueue()** also has two optional arguments. **_timeOffset** (float) (default 0) is a value in seconds to offset playback. It can be used to delay the start of playback (negative value) or to fast-forward into playback (positive value). **_deferLimit** (int) (default 1) determines how many additional file reads are allowed per frame if the streamed data queue is immediately cleared. Large values may reduce the framerate.
+**initAudioQueue()** also has two optional arguments. **_timeOffset** (float) (default **0**) is a value in seconds to offset playback. It can be used to delay the start of playback (negative value) or to fast-forward into playback (positive value). **_deferLimit** (int) (default **1**) determines how many additional file reads are allowed per frame if the streamed data queue is immediately cleared. Large values may reduce the framerate.
 
 Once we've initialized the queue, calling **streamAudioQueue(ref _queue, _file)** every frame will stream audio events from the file. The function takes two arguments: **_queue** (struct) is the return from **initAudioQueue()** that we stored in a variable, and **_file** (file handle) is the file to read the sequence from.
 
@@ -311,6 +313,37 @@ loop
 	streamAudioQueue(queue, file)
 repeat
 ```
+
+--------
+
+TRANSPORT CONTROLS
+-
+In all transport functions, **_queue** is the audio queue returned by **initAudoQueue()** and **_file** is the handle for the file that contains the audio sequence.
+
+**RESET PLAYBACK**
+To reset playback, call **reinitAudioQueue(ref _queue, _file, opt _timeOffset)**. This resets the queue state as though it had just been initialized with **initAudioQueue()** but does not reload the sample pool and does not reset the internal counter that tracks how many loops have occurred.
+
+**LOOP**
+By default, audio sequences do not loop. To define loop behavior for an audio queue, call **setAudioQueueLoop(ref _queue, _loops, opt _loopTail, opt _loopStartTime, opt _loopStartBeat)**. The **_loops** (int) argument works like **playAudio()**'s **loops** argument, with **-1** indicating infinite looping and any other value specifying a loop count. The optional **_loopTail** (float) (default **0**) sets a time in seconds to wait after the sequence's final event before looping. **_loopStartTime** (float) (default **-1**) and **_loopStartBeat** (vector2) (default **{-1, -1}**) allow you to set a loop start point other than the sequence's beginning. Negative values disable the start position modifier. If both arguments are non-negative, their values are combined. This alternate start point uses the **seekPosInAudioSequence()** algorithm because it is faster than the **chasePosInAudioSequence()** algorithm, which means that playback from the loop start point may not reflect changes to parameter values that exist before the loop point in the sequence.
+
+**SCHEDULE PLAYBACK**
+To schedule playback to begin at a specific time, call **setAudioQueueStartTime(ref _queue, _startTime)**. **_startTime** (float) is the clock time in seconds at which playback is to begin. This clock time refers to the value of the **time()** function, so if you want to schedule playback at, for example, five seconds in the future, **_startTime**'s value should be **time() + 5**.
+
+**PAUSE**
+To pause audio playback, call **pauseAudioQueue(ref _queue, opt _stopCh)**. **_stopCh** (array of ints) (default **[]**) is an optional array of audio channels to call the **stopChannel()** function on. This will immediately stop playback on those channels rather than allowing the channel's current sample or synth note to finish naturally.
+
+**UNPAUSE**
+To unpause a paused audio queue, call **unpauseAudioQueue(ref _queue, opt _restartCh)**. **_restartCh** (array of ints) (default **[]**) is an optional array of channels to call the **startChannel()** function on. This is typically the same array that is given as **_stopCh** when calling **pauseAudioQueue()**.
+
+**SEEK POSITION**
+To set a new playback position within the sequence, call **seekPosInAudioSequence(_queue, _file, _jumpToTime, opt _jumpToBeat)**. **_JumpToTime** (float) is the time in seconds within the sequence to jump to and **_jumpToBeat** (vector2) (default **{-1, -1}**) is the time in measures and beats to jump to. An argument with a value of **-1** is not considered in the jump; if both arguments are **0** or greater, they are combined. Note that **_queue** is *not* passed as a reference and must be manually updated by overwriting the original parameter passed as **_queue** with the function's return.
+
+**seekPosInAudioSequence()** does not chase parameter values. This means that parameter value changes that occur before the jump point do not take effect, so the state of parameters upon beginning playback from the jump point may not be the same as they would be at that point had the sequence been played from its start. Parameter values can be chased by using **chasePosInAudioSequence()** instead, but this function is very slow. A compromise solution is to use **seekPosInAudioSequence()** and also disable event culling during assembly (see ASSEMBLY). Disabling event culling means that there will be more repetition of identical parameter values which makes it more likely that the correct parameter values will be encountered when beginning playback at an arbitrary position without chasing.
+
+**CHASE POSITION**
+To set a new playback position within the sequence with parameter chasing enabled, call **chasePosInAudioSequence(_queue, _file, _jumpToTime, opt _jumpToBeat)**. **_JumpToTime** (float) is the time in seconds within the sequence to jump to and **_jumpToBeat** (vector2) (default **{-1, -1}**) is the time in measures and beats to jump to. An argument with a value of **-1** is not considered in the jump; if both arguments are **0** or greater, they are combined. Note that **_queue** is *not* passed as a reference and must be manually updated by overwriting the original parameter passed as **_queue** with the function's return.
+
+Chasing is a slow operation but it ensures that all parameter states are correct regardless of where playback begins from. When possible, use **seekPosInAudioSequence()** instead.
 
 --------
 
@@ -396,11 +429,7 @@ function buildAudio()
 			"forceWrite",
 			// Play the clip starting at the fifth measure and 
 			// transpose it down an octave.
-			[ [ ["beatPos", {4, 0}], ["pitch", -12] ], "Notes"],
-			// Stop both channels at the end of the sequence to make
-			// sure the last events don't hang (see KNOWN ISSUES).
-			[ .beatPos = {5, 1}, .func = "stopChannel", .ch = 0 ],
-			[ .beatPos = {5, 1}, .func = "stopChannel", .ch = 1 ]
+			[ [ ["beatPos", {4, 0}], ["pitch", -12] ], "Notes"]
 		]
 	]
 	
@@ -440,9 +469,15 @@ repeat
 
 KNOWN ISSUES
 -
-* Final events may hang at the end of the sequence. This can be avoided by providing a **stopChannel** event for affected channels.
+* Playback at a low framerate may suffer from timing inaccuracies. FUZE can't call audio functions faster than the framerate, so reducing the framerate also reduces the timing accuracy of audio events.
 
-* There may be a tempo hiccup at the start of playback because the sequence wants to begin before the load has completed. This can be avoided by giving a slight negative value for **initAudioQueue()**'s **_timeOffset** argument.
+--------
 
-* Playback at a low framerate may suffer from timing inaccuracies. FUZE can't call audio  functions faster than the framerate, so reducing the framerate also reduces the timing accuracy of audio events.
-
+CHANGE LOG
+-
+**1.0.10**
+* Added transport controls (pause, seek, chase, loop).
+* Added the ability to set a specific start time via setAudioQueueStartTime().
+* Event culling can now be disabled during assembly.
+* Fixed a bug that could cause final events in a sequence to hang.
+* Fixed a bug that could cause a tempo hiccup when starting playback.

@@ -1,6 +1,6 @@
-/* Music
-   Toolkit     __
-   Demo  ___---  |
+/*  FUZE    1.0.10
+   Music       __
+ Toolkit ___---  |
       --- ___--  |
      |  --     | |
      | "Rule   | |
@@ -10,6 +10,15 @@
   ---  | by\____/
  /     |Petra
  \____/Crockett */
+
+// Changelog:
+//
+// v1.0.10
+// * Added transport controls (pause, seek, chase, loop).
+// * Added the ability to set a specific start time via setAudioQueueStartTime().
+// * Event culling can now be disabled during assembly.
+// * Fixed a bug that could cause final events in a sequence to hang.
+// * Fixed a bug that could cause a tempo hiccup when starting playback.
 
 setMode(640, 360)
 var g_freezeFile = false // Set to true to prevent writing changes to the text file
@@ -707,7 +716,7 @@ function buildAudio()
 		],
 		[
 			"4BeatLead3",
-			[ ["beatPos", {0, 0}], ["ch", 0], ["vol", 0], ["pitch", 0], ["inst", ""] ],
+			[ ["beatPos", {0, 0}], ["ch", 0], ["tol", 0], ["pitch", 0], ["inst", ""] ],
 			
 			[ [ ["beatPos", {0, 0.5}], ["ch", 0], ["vol", -0.1], ["pitch", 0] ], ["inst", ""]],
 			[ [ ["beatPos", {0, 0.75}], ["ch", 0], ["vol", -0.1], ["pitch", 0] ], ["inst", ""]],
@@ -2250,7 +2259,7 @@ function buildAudio()
 			[ [ ["beatPos", {65, 0}], ["ch", 13], ["vol", 0.1], ["inst", "lead"] ], "1mBass3D" ], // Lead
 			"forceWrite",
 			// m. 66
-			[ [ ["beatPos", {66,  }], ["ch", 0] ], "4BeatDrum4A" ],
+			[ [ ["beatPos", {66, 0}], ["ch", 0] ], "4BeatDrum4A" ],
 			[ [ ["beatPos", {66, 0}], ["ch", 8], ["vol", 0.75], ["pitch", "c6"], ["pan", -0.5], ["inst", "beep"] ], "1mBass1A" ],
 			[ [ ["beatPos", {66, 0}], ["ch", 9], ["vol", 0.75], ["pan", 0.5], ["pitch", "g5"], ["inst", "beep"] ], "1mBass1A" ],
 			"forceWrite",
@@ -2372,7 +2381,7 @@ var g_file = open()
 // UNCOMMENT THIS LINE TO VIEW THE MUSIC DATA SAVED IN THE TEXT FILE
 //debugFile(g_file)
 
-var g_queue = initAudioQueue("MusicTrack", g_file, -1, 1)
+var g_queue = initAudioQueue("MusicTrack", g_file)
 
 // ----------------------------------------------------------------
 // MAIN LOOP
@@ -2388,27 +2397,272 @@ repeat
 	// ----------------------------------------------------------------
 	// PUBLIC FUNCTIONS
 
+// Saves an audio clip defined in buildAudio() to the text file for future streaming.
+function assembleAudioSequence(_clipName, _saveAsName, _buildResult)
+return assembleAudioSequence(_clipName, _saveAsName, _buildResult, true)
+
+function assembleAudioSequence(_clipName, _saveAsName, _buildResult, _cullRepeatedEvents)
+	textSize(gheight() * 0.05)
+	clear()
+	printAt(0, 0, "Loading assembler ...")
+	update()
+	
+	var file = open()
+	var fileInsertIdx = -1
+	var spool = getAudioClipByName(_buildResult.clips, _clipName)
+	var idx = 2
+	var spoolLegend  = [ [ .params = spool[1], .len = len(spool) - 2 ] ]
+	var timer = time()
+	var queue = []
+	var lastClipValues = []
+	var lastClipRemaining = 0
+	var totalPruned = 0
+	var totalCulled = 0
+	var totalEvents = 0
+	var elapsed = 0
+	
+	// Defaults for when a previous event doesn't exist
+	var recent = [
+		.lastFunc = "playNote",
+		.lastCh = 0,
+		.lastBeatPos = {0, 0},
+		.lastTimePos = 0,
+		.playAudio = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "playAudio", .arg = [ -1, 1, 0.5, 1, -1 ] ],
+		.playNote = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "playNote", .arg = [ 3, 440, 1, 25, 0.5 ] ],
+		.setClipper = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setClipper", .arg = [ 1, 50 ] ],
+		.setEnvelope = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setEnvelope", .arg = [ 0, 25 ] ],
+		.setFilter = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setFilter", .arg = [ 0, 1000 ] ],
+		.setFrequency = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setFrequency", .arg = [ 440 ] ],
+		.setModulator = [ .beatPos = {0, 0}, .timePos = 0.00, .ch = 0, .func = "setModulator", .arg = [ 3, 5, 1 ] ],
+		.setPan = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setPan", .arg = [ 0.5 ] ],
+		.setReverb = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setReverb", .arg = [ 60, 1 ] ],
+		.setVolume = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setVolume", .arg = [ 1 ] ],
+		.startChannel = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "startChannel", .arg = [] ],
+		.stopChannel = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "stopChannel", .arg = [] ]
+	]
+	
+	var lastEventTime = -1
+	
+	writeTempoMap(_saveAsName, file, _buildResult.tempoMap, true)
+	writeSamples(_saveAsName, file, _buildResult.samples, false)
+	
+	while idx < len(spool) loop
+		var elemType = getType(spool[idx])
+		if elemType == "array" then
+			var isHeader
+			var legendAtIdx
+			
+			// Is this a parameter header?
+			if getType(spool[idx][0][0]) != "array" then
+				isHeader = true
+				legendAtIdx = spool[idx]
+			else
+				isHeader = false
+				legendAtIdx = spool[idx][0]
+			endif
+			
+			var i
+			var j
+			
+			// Apply current spoolLegend to new spoolLegend
+			var spoolLegendEndIdx = len(spoolLegend) - 1
+			var legendResult = combineLegends(spoolLegend[spoolLegendEndIdx], legendAtIdx, _buildResult.tempoMap)
+			
+			spoolLegend[spoolLegendEndIdx] = legendResult.old
+			legendAtIdx = legendResult.new
+			
+			if isHeader then
+				spoolLegend = push(spoolLegend, [ .params = spool[idx][0], .len = len(subArr) - 1 ])
+			else
+				// Special case: parameter used to select audio clip
+				if getType(spool[idx][1]) == "array" then
+					var found = false
+					var instHeader = legendResult.old.params
+					
+					var i
+					for i = 0 to len(instHeader) loop
+						if instHeader[i][0] == spool[idx][1][0] then
+							spool[idx][1] = instHeader[i][1]
+							found = true
+						endif
+					repeat
+					
+					if !found then
+						debugPrint(999, [spool[idx][1][1] + " isn't a valid audio clip."])
+					endif
+				endif
+				
+				var subArr = getAudioClipByName(_buildResult.clips, spool[idx][1])
+				subArr = remove(subArr, 0) // Remove subArr's name entry
+				
+				legendResult = combineLegends([ .params = legendAtIdx, .len = 0 ], subArr[0], _buildResult.tempoMap) // Apply subArr's header
+				spoolLegend = push(spoolLegend, [ .params = legendResult.new, .len = len(subArr) - 1 ])
+				
+				spool = remove(spool, idx) // Remove reference entry
+				spool = insertArray(spool, subArr, idx) // Don't include header from subArr
+				
+				// Cull old spool entries occasionally to prevent reaching variable limit
+				if idx > 100 then
+					spool = splitEndOnly(spool, idx)
+					idx = 0
+				endif
+			endif
+		else if elemType == "struct" then
+			var parsedResult = parseSndData(spool[idx], recent, spoolLegend[len(spoolLegend) - 1].params, _buildResult.samples, 
+				_buildResult.tempoMap, -1, -1)
+			var parsed = parsedResult.parsed
+			recent = parsedResult.recent
+			
+			var queueStartIdx = len(queue) - 1
+			var i
+			for i = 0 to len(parsed) loop
+				var queueResult
+				
+				if i == 0 then
+					queueResult = addFirstQueuedSnd(parsed[i], queue, _buildResult.tempoMap)
+					totalPruned += queueResult.pruned
+					queue = queueResult.queue
+					
+					if queueResult.pruned then
+						array cleanQueue[len(queue) - queueResult.pruned]
+						var cleanIdx = 0
+						
+						var j
+						for j = 0 to len(queue) loop
+							if getType(queue[j]) == "struct" then
+								cleanQueue[cleanIdx] = queue[j]
+								cleanIdx += 1
+							endif
+						repeat
+						
+						queue = cleanQueue
+					endif
+				else
+					queueResult = addAdditionalQueuedSnd(parsed[i], queue, queueStartIdx, _buildResult.tempoMap)
+					queue = queueResult.queue
+				endif
+				
+				queueStartIdx = queueResult.idx
+				lastEventTime = getTimeFromTempoMap(_buildResult.tempoMap, parsed[i].beatPos) + parsed[i].timePos
+			repeat
+			
+			spoolLegend[len(spoolLegend) - 1].len -= 1
+		else // String
+			if str(spool[idx]) == "forceWrite" then
+				var split = split(queue, floor(lastClipRemaining + (len(queue) - lastClipRemaining) / 2))
+				
+				var cullResult = updateLastClipValues(split[0], lastClipValues, _cullRepeatedEvents)
+				split[0] = cullResult.queue
+				lastClipValues = cullResult.lastClipValues
+				totalCulled += cullResult.culled
+				
+				fileInsertIdx = writeAudioSequence(_saveAsName, file, split[0], fileInsertIdx, false)
+				totalEvents += len(split[0])
+				lastClipRemaining = len(split[1])
+				queue = split[1]
+				
+				spoolLegend[len(spoolLegend) - 1].len -= 1
+			endif
+		endif endif
+		
+		// If we've passed the entries this spoolLegend applies to, remove it
+		if len(spoolLegend) then
+			while spoolLegend[len(spoolLegend) - 1].len <= 0 loop
+				spoolLegend = remove(spoolLegend, len(spoolLegend) - 1)
+				
+				if !len(spoolLegend) then break endif
+			repeat
+		endif
+		
+		idx += 1
+		
+		if time() >= timer + 0.1 then
+			elapsed += time() - timer
+			var prog = len(str(split(spool, idx + 1)[0]))
+			clear()
+			var sec = str(elapsed % 60)
+			
+			if len(sec) == 1 then
+				sec = "0" + sec
+			endif
+			
+			printAt(0, 0, "Assembling audio data. This may take a while.")
+			printAt(0, 2, "Elapsed: " + int(elapsed / 60) + ":" + sec)
+			if len(queue) then
+				printAt(0, 3, "Event: " + recent.lastFunc)
+				printAt(0, 4, "Beat position: " + str(recent.lastBeatPos))
+				printAt(0, 5, "Channel: " + str(recent.lastCh))
+				printAt(0, 6, "Sort buffer length: " + len(queue))
+			endif
+			timer = time()
+			update()
+		endif
+	repeat
+	
+	if len(queue) then
+		var cullResult = updateLastClipValues(queue, lastClipValues, _cullRepeatedEvents)
+		queue = cullResult.queue
+		writeAudioSequence(_saveAsName, file, queue, fileInsertIdx, false)
+		totalCulled += cullResult.culled
+		totalEvents += len(queue)
+	endif
+	
+	var sec = str(elapsed % 60)
+	if len(sec) == 1 then
+		sec = "0" + sec
+	endif
+	
+	close(file)
+	
+	playNote(0, 3, note2Freq(84), 0.5, 15, 0.5)
+	debugPrint(0, ["Audio assembly finished in " + int(elapsed / 60) + ":" + sec + "." + chr(10),
+		"Audio events written: " + totalEvents,
+		"Duplicate audio events pruned: " + totalPruned,
+		"Repeated audio events culled: " + totalCulled])
+return void
+
 // Reads data incrementally from the text file and plays audio events that
 // are due. Info about position in the file is retained within _queue.
 function streamAudioQueue(ref _queue, _file)
 	_queue.queueDeferCount = 0
 	_queue.lastAudio = []
+	var loadTimer = time()
 	
-	if _queue.queueIdx >= len(_queue.queue) and _queue.queueDeferCount <= _queue.queueDeferLimit then
-		while _queue.queueIdx >= len(_queue.queue) and _queue.queueDeferCount <= _queue.queueDeferLimit loop
-			var newQueueElems = streamAudioSequence(_queue.name, _file, _queue, 10)
-			
-			_queue.queue = newQueueElems
-			_queue.queueIdx = 0
-			
-			var updateResult = updateSndQueue(_queue)
-			_queue.lastAudio = insertArray(_queue.lastAudio, updateResult)
-			
-			_queue.queueDeferCount += 1
-			_queue.playing = true
-		repeat
+	if _queue.pauseTime < 0 and _queue.endedTime < 0 then
+		if _queue.queueIdx >= len(_queue.queue) and _queue.queueDeferCount <= _queue.queueDeferLimit then
+			while _queue.queueIdx >= len(_queue.queue) and _queue.queueDeferCount <= _queue.queueDeferLimit loop
+				// If start time hasn't been set, default to current time
+				if _queue.startTime == float_min then
+					_queue.startTime = time()
+				endif
+				
+				var streamResult = streamAudioSequence(_queue, _file, 10)
+				
+				_queue = streamResult.queue
+				var newQueueElems = streamResult.elems
+				
+				_queue.queue = newQueueElems
+				_queue.queueIdx = 0
+				
+				var updateResult = updateSndQueue(_queue)
+				_queue.lastAudio = insertArray(_queue.lastAudio, updateResult)
+				
+				_queue.queueDeferCount += 1
+			repeat
+		else
+			_queue.lastAudio = updateSndQueue(_queue)
+		endif
 	else
-		_queue.lastAudio = updateSndQueue(_queue)
+		if _queue.endedTime >= 0 and _queue.pauseTime < 0 then
+			if time() - _queue.endedTime >= _queue.loopTail and (_queue.loopIdx < _queue.loops or _queue.loops < 0)then
+				_queue.loopIdx += 1
+				reinitAudioQueue(_queue, _file)
+				
+				if _queue.loopStartTime > 0 then
+					_queue = seekPosInAudioSequence(_queue, _file, _queue.loopStartTime)
+				endif
+			endif
+		endif
 	endif
 return _queue
 
@@ -2417,6 +2671,9 @@ return _queue
 function initAudioQueue(_name, _file)
 return initAudioQueue(_name, _file, 0, 1)
 
+function initAudioQueue(_name, _file, _timeOffset)
+return initAudioQueue(_name, _file, _timeOffset, 1)
+
 function initAudioQueue(_name, _file, _timeOffset, _deferLimit)
 	var audioQueue = [
 		.fileDat = [ .section = -1, .block = [ .idx = -1 ], .unit = -1, .field = -1, .elem = -1 ],
@@ -2424,12 +2681,19 @@ function initAudioQueue(_name, _file, _timeOffset, _deferLimit)
 		.queueIdx = 0,
 		.lastAudio = [],
 		.playheadOffset = _timeOffset,
-		.playing = false,
 		.queueDeferLimit = 1,
 		.queueDeferCount = 0,
 		.tempoMap = readTempoMap(_name, _file),
 		.samples = readSamples(_name, _file),
-		.name = _name
+		.name = _name,
+		.startTime = float_min,
+		.pauseTime = -1,
+		.pauseStopCh = [],
+		.endedTime = -1,
+		.loops = 0,
+		.loopTail = 0,
+		.loopIdx = 0,
+		.loopStartTime = 0
 	]
 	
 	var i
@@ -2437,6 +2701,267 @@ function initAudioQueue(_name, _file, _timeOffset, _deferLimit)
 		audioQueue.samples[i] = loadAudio(audioQueue.samples[i])
 	repeat
 return audioQueue
+
+// Reinitializes the audio queue. This resets the queue so that playback will begin from
+// the start of the audio sequence but does not reload samples or reset the loop counter.
+function reinitAudioQueue(ref _queue, _file)
+return reinitAudioQueue(_queue, _file, _queue.playheadOffsset)
+
+function reinitAudioQueue(ref _queue, _file, _timeOffset)
+	_queue.fileDat = [ .section = -1, .block = [ .idx = -1 ], .unit = -1, .field = -1, .elem = -1 ]
+	_queue.queue = []
+	_queue.queueIdx = 0
+	_queue.lastAudio = []
+	_queue.playheadOffset = _timeOffset
+	_queue.queueDeferCount = 0
+	_queue.startTime = float_min
+	_queue.pauseTime = -1
+	_queue.pauseStopCh = []
+	_queue.endedTime = -1
+return _queue
+
+// Defines the loop behavior of the audio queue. By default, the audio sequence does not loop.
+// _loops sets how many times to loop (-1 is infinite).
+// _loopTail (default 0) is how long in seconds after the final event to wait before looping.
+// _loopStartTime (default 0) is the position in the sequnce in seconds where the loop should begin. Added to
+// 	the beat time of the loop start if both are present.
+// _loopStartBeat (default {0, 0}) is the position in the sequnce in measures/beats where the loop should begin.
+function setAudioQueueLoop(ref _queue, _loops)
+return setAudioQueueLoop(_queue, _loops, 0, -1, {-1, -1})
+
+function setAudioQueueLoop(ref _queue, _loops, _loopTail)
+return setAudioQueueLoop(_queue, _loops, _loopTail, -1, {-1, -1})
+
+function setAudioQueueLoop(ref _queue, _loops, _loopTail, _loopStartTime)
+return setAudioQueueLoop(_queue, _loops, _loopTail, _loopStartTime, {-1, -1})
+
+function setAudioQueueLoop(ref _queue, _loops, _loopTail, _loopStartTime, _loopStartBeat)
+	_queue.loops = _loops
+	_queue.loopTail = _loopTail
+	_queue.loopIdx = 0
+	
+	if _loopStartBeat.x >= 0 and _loopStartBeat.y >= 0 then
+		if _loopStartTime < 0 then
+			_loopStartTime = 0
+		endif
+		
+		_loopStartTime += getTimeFromTempoMap(_queue.tempoMap, _loopStartBeat, 0)
+		_loopStartTime = max(_loopStartTime, 0)
+	endif
+		
+	if _loopStartTime >= 0 then
+		_queue.loopStartTime = _loopStartTime
+	endif
+return _queue
+	
+// Sets the tiime that the sequence shouuld begin playing.
+function setAudioQueueStartTime(ref _queue, _startTime)
+	_queue.startTime = _startTime
+return _queue
+
+// Pauses playback of the audio sequence. _stopCh is an optional array for channels on 
+// which stopChannel() should be called in order to hard-cut audio.
+function pauseAudioQueue(ref _queue)
+return pauseAudioQueue(_queue, [])
+
+function pauseAudioQueue(ref _queue, _stopCh)
+	if _queue.pauseTime < 0 then
+		_queue.pauseTime = time()
+	endif
+	
+	var i
+	for i = 0 to len(_stopCh) loop
+		stopChannel(_stopCh[i])
+	repeat
+	
+	_queue.pauseStopCh = _stopCh
+return _queue
+
+// Resumes paused playback. _restartCh is an array of channels to call startChannel() on. 
+// Usually the same as pauseAudioQueue()'s _stopCh
+function unpauseAudioQueue(ref _queue)
+return unpauseAudioQueue(_queue, [])
+
+function unpauseAudioQueue(ref _queue, _restartCh)
+	if _queue.pauseTime >= 0 then
+		_queue.startTime += time() - _queue.pauseTime
+		
+		if _queue.endedTime >= 0 then
+			_queue.endedTime += time() - _queue.pauseTime
+		endif
+		
+		_queue.pauseTime = -1
+		
+		var i
+		for i = 0 to len(_restartCh) loop
+			startChannel(_restartCh[i])
+		repeat
+	endif
+return _queue
+
+// Jumps playback a time and/or beat position. If both time and beat are given, time 
+// is added to beat. Events are not chased, so parameter state may be incorrect.
+function seekPosInAudioSequence(_queue, _file, _jumpToTime)
+return seekPosInAudioSequence(_queue, _file, _jumpToTime, {-1, -1})
+
+function seekPosInAudioSequence(_queue, _file, _jumpToTime, _jumpToBeat)
+	if _jumpToBeat.x >= 0 and _jumpToBeat.y >= 0 then
+		if _jumpToTime < 0 then
+			_jumpToTime = 0
+		endif
+		
+		_jumpToTime += getTimeFromTempoMap(_queue.tempoMap, _jumpToBeat, 0)
+		_jumpToTime = max(_jumpToTime, 0)
+	endif
+	
+	var chunk
+	
+	var sectionIdx = findFileSection(_file, "audioSequence" + _queue.name)
+	
+	var seekStartIdx = findFileChunk(_file, blockStr("events"), [ chr(31) ], sectionIdx.start, sectionIdx.end).start
+	var seekEndIdx = sectionIdx.end
+	
+	chunk = getNextFileChunk(_file, seekStartIdx)
+	
+	_queue.fileDat = [ .section = sectionIdx, .block = chunk, .unit = -1, .field = -1, .elem = -1 ]
+	
+	var halfIdx = seekStartIdx + floor((seekEndIdx - seekStartIdx) / 2)
+	var unitIdx = findFileChar(_file, chr(30), halfIdx)
+	var lastSeekIdx = -1
+	
+	var pos
+	
+	while unitIdx >= 0 and unitIdx <= sectionIdx.end loop
+		chunk = getNextFileChunk(_file, unitIdx)
+		
+		if lastSeekIdx == chunk.idx then
+			break
+		else
+			lastSeekIdx = chunk.idx
+			_queue.fileDat.unit = chunk
+		endif
+		
+		var field
+		var fieldIdx = -1
+		pos = [ .beatPos = {float_min, float_min}, .timePos = float_min ]
+		
+		while inFileUnit(chunk) loop
+			chunk = getNextFileChunk(_file, chunk.nextIdx) // Field
+			_queue.fileDat.field = chunk
+			field = chunk.dat
+			fieldIdx = chunk.idx
+			
+			array elem[0]
+			while inFileField(chunk) loop
+				chunk = getNextFileChunk(_file, chunk.nextIdx) // Elem
+				_queue.fileDat.elem = chunk
+				
+				elem = push(elem, chunk.dat)
+			repeat
+			
+			loop if field == "b" then
+				pos.beatPos = decodeElem(elem)
+				break endif
+			if field == "t" then
+				pos.timePos = decodeElem(elem)
+				break
+			endif break repeat
+		repeat
+		
+		if pos.timePos != float_min then
+			if getTimeFromTempoMap(_queue.tempoMap, pos.beatPos, 0) + pos.timePos >= _jumpToTime then
+				seekEndIdx = fieldIdx
+				halfIdx = seekStartIdx + floor((seekEndIdx - seekStartIdx) / 2)
+				unitIdx = findFileChar(_file, chr(30), halfIdx)
+			else
+				seekStartIdx = chunk.idx
+				halfIdx = seekStartIdx + floor((seekEndIdx - seekStartIdx) / 2)
+				unitIdx = findFileChar(_file, chr(30), halfIdx)
+			endif
+		endif
+	repeat
+	
+	if _jumpToTime >= 0 then
+		if _queue.startTime == float_min then _queue.startTime = 0 endif
+		_queue.startTime -= _jumpToTime - time()
+	endif
+return _queue
+
+// Jumps playback a time and/or beat position. If both time and beat are given, time 
+// is added to beat. Events are chased, so parameter state will be correct, but the 
+// chase process is very slow -- use seekPosInAudioSequence() instead when possible.
+function chasePosInAudioSequence(_queue, _file, _jumpToTime)
+return chasePosInAudioSequence(_queue, _file, _jumpToTime, {-1, -1})
+
+function chasePosInAudioSequence(_queue, _file, _jumpToTime, _jumpToBeat)
+	if _jumpToBeat.x >= 0 and _jumpToBeat.y >= 0 then
+		if _jumpToTime < 0 then
+			_jumpToTime = 0
+		endif
+		
+		_jumpToTime += getTimeFromTempoMap(_queue.tempoMap, _jumpToBeat, 0)
+		_jumpToTime = max(_jumpToTime, 0)
+	endif
+	
+	var chunk
+	var sectionIdx = findFileSection(_file, "audioSequence" + _queue.name)
+	var chunkIdx = findFileChunk(_file, blockStr("events"), [ chr(31) ], sectionIdx.start, sectionIdx.end)
+	chunk = getNextFileChunk(_file, chunkIdx.start)
+	
+	_queue.fileDat = [ .section = sectionIdx, .block = chunk, .unit = -1, .field = -1, .elem = -1 ]
+	
+	array sndGroup[0]
+	var field
+	
+	while inFileBlock(chunk) loop
+		chunk = getNextFileChunk(_file, chunk.nextIdx) // Unit
+		_queue.fileDat.unit = chunk
+		
+		var ch = -1
+		var newSnd = [ .ch = -1, .beatPos = {0, 0}, .timePos = 0, .func = "", .arg = [] ]
+		
+		while inFileUnit(chunk) loop
+			chunk = getNextFileChunk(_file, chunk.nextIdx) // Field
+			_queue.fileDat.field = chunk
+			field = chunk.dat
+			
+			array elem[0]
+			while inFileField(chunk) loop
+				
+				chunk = getNextFileChunk(_file, chunk.nextIdx) // Elem
+				_queue.fileDat.elem = chunk
+				elem = push(elem, chunk.dat)
+			repeat
+			
+			loop if field == "b" then
+				newSnd.beatPos = decodeElem(elem)
+				break endif
+			if field == "t" then
+				newSnd.timePos = decodeElem(elem)
+				break endif
+			if field == "c" then
+				newSnd.ch = decodeElem(elem)
+				break endif
+			if field == "f" then
+				newSnd.func = decodeElem(elem)
+				break endif
+			if field == "a" then
+				newSnd.arg = decodeElem(elem)
+				break
+			endif break repeat
+		repeat
+		
+		playQueuedSnd(newSnd, _queue.samples)
+		stopChannel(newSnd.ch)
+		
+		if getTimeFromTempoMap(_queue.tempoMap, newSnd.beatPos, 0) + newSnd.timePos >= _jumpToTime then
+			break
+		endif
+	repeat
+	
+	if _queue.startTime == float_min then _queue.startTime = 0 endif
+	_queue.startTime -= _jumpToTime - time()
+return _queue
 
 	// ----------------------------------------------------------------
 	// TEMPO MAP FUNCTIONS
@@ -2590,6 +3115,9 @@ return result
 
 // Gets clock time at a given measure/beat position.
 function getTimeFromTempoMap(_tempoMap, _pos)
+return getTimeFromTempoMap(_tempoMap, _pos, 0)
+
+function getTimeFromTempoMap(_tempoMap, _pos, _baseTime)
 	var clockTime = 0
 	var secPerBeat
 	
@@ -2608,7 +3136,7 @@ function getTimeFromTempoMap(_tempoMap, _pos)
 				+ _tempoMap[i].beatPos.y - _tempoMap[i - 1].beatPos.y) * secPerBeat
 		endif endif
 	repeat
-return clockTime
+return clockTime + _baseTime
 
 	// ----------------------------------------------------------------
 	// ASSEMBLER
@@ -2738,12 +3266,6 @@ function parseSndData(_snd, _recent, _legend, _sampleArr, _tempoMap, _autoRate, 
 				if strContains(strSnd, ".root = ") then
 					root = toMidiIfNeeded(_snd[i].root)
 				endif
-				
-				/*if strContains(strSnd, ".spd = ") then
-					parsedArr[i].arg[3] = float(parseExposedParam(_snd[i].spd, _legend, _tempoMap))
-				else
-					parsedArr[i].arg[3] = _recent.playAudio.arg[3]
-				endif*/
 				
 				parsedArr[i].arg[3] = getFactorFromRootDif(root, param)
 			else if strContains(strSnd, ".spd = ") then
@@ -2938,8 +3460,8 @@ function parseSndData(_snd, _recent, _legend, _sampleArr, _tempoMap, _autoRate, 
 	// If more than one _snd entry, then we're setting automation
 	if len(parsedArr) > 1 and !strContains(strSnd, "setAuto") then
 		_autoRate = max(_autoRate, 0.0166)
-		var startTimeBeat = getTimeFromTempoMap(_tempoMap, parsedArr[0].beatPos)// + parsedArr[0].timePos
-		var endTimeBeat = getTimeFromTempoMap(_tempoMap, parsedArr[1].beatPos)// + parsedArr[1].timePos
+		var startTimeBeat = getTimeFromTempoMap(_tempoMap, parsedArr[0].beatPos)
+		var endTimeBeat = getTimeFromTempoMap(_tempoMap, parsedArr[1].beatPos)
 		
 		var startTime = startTimeBeat + parsedArr[0].timePos
 		var endTime = endTimeBeat + parsedArr[1].timePos
@@ -3083,7 +3605,9 @@ return result
 
 // Removes repeated events of the same type/value that do nothing but increase queue length.
 // _lastClipValues is an array of starting values that represent the state of the previous clip's end.
-function cullEventsInQueue(_queue, _lastClipValues)
+function updateLastClipValues(_queue, _lastClipValues, _cullEvents)
+	var culled = 0
+	
 	if !len(_lastClipValues) then
 		 var chDefault = [
 			.setClipper = [ float_min, float_min ],
@@ -3137,65 +3661,73 @@ function cullEventsInQueue(_queue, _lastClipValues)
 			_lastClipValues[ch].setPan[0] = _queue[i].arg[4]
 			break endif
 		if _queue[i].func == "setClipper" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setClipper) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setClipper) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setClipper = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setEnvelope" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setEnvelope) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setEnvelope) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setEnvelope = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setFilter" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setFilter) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setFilter) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setFilter = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setFrequency" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setFrequency) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setFrequency) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setFrequency = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setModulator" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setModulator) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setModulator) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setModulator = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setPan" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setPan) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setPan) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setPan = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setReverb" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setReverb) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setReverb) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setReverb = _queue[i].arg
 			endif
 			break endif
 		if _queue[i].func == "setVolume" then
-			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setVolume) then
+			if arrayEquals(_queue[i].arg, _lastClipValues[ch].setVolume) and _cullEvents then
 				_queue = remove(_queue, i)
 				i -= 1
+				culled += 1
 			else
 				_lastClipValues[ch].setVolume = _queue[i].arg
 			endif
@@ -3207,220 +3739,10 @@ function cullEventsInQueue(_queue, _lastClipValues)
 	
 	result = [
 		.queue = _queue,
-		.lastClipValues = _lastClipValues
+		.lastClipValues = _lastClipValues,
+		.culled = culled
 	]
 return result
-
-// Saves an audio clip defined in buildAudio() to the text file for future streaming.
-function assembleAudioSequence(_clipName, _saveAsName, _buildResult)
-	var file = open()
-	var fileInsertIdx = -1
-	var spool = getAudioClipByName(_buildResult.clips, _clipName)
-	var idx = 2
-	var spoolLegend  = [ [ .params = spool[1], .len = len(spool) - 2 ] ]
-	var timer = time()
-	var queue = []
-	var lastClipValues = []
-	var lastClipRemaining = 0
-	var totalPruned = 0
-	var totalEvents = 0
-	var elapsed = 0
-	
-	// Defaults for when a previous event doesn't exist
-	var recent = [
-		.lastFunc = "playNote",
-		.lastCh = 0,
-		.lastBeatPos = {0, 0},
-		.lastTimePos = 0,
-		.playAudio = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "playAudio", .arg = [ -1, 1, 0.5, 1, -1 ] ],
-		.playNote = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "playNote", .arg = [ 3, 440, 1, 25, 0.5 ] ],
-		.setClipper = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setClipper", .arg = [ 1, 50 ] ],
-		.setEnvelope = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setEnvelope", .arg = [ 0, 25 ] ],
-		.setFilter = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setFilter", .arg = [ 0, 1000 ] ],
-		.setFrequency = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setFrequency", .arg = [ 440 ] ],
-		.setModulator = [ .beatPos = {0, 0}, .timePos = 0.00, .ch = 0, .func = "setModulator", .arg = [ 3, 5, 1 ] ],
-		.setPan = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setPan", .arg = [ 0.5 ] ],
-		.setReverb = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setReverb", .arg = [ 60, 1 ] ],
-		.setVolume = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "setVolume", .arg = [ 1 ] ],
-		.startChannel = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "startChannel", .arg = [] ],
-		.stopChannel = [ .beatPos = {0, 0}, .timePos = 0.0, .ch = 0, .func = "stopChannel", .arg = [] ]
-	]
-	
-	var lastEventTime = -1
-	
-	writeTempoMap(_saveAsName, file, _buildResult.tempoMap, true)
-	writeSamples(_saveAsName, file, _buildResult.samples, false)
-	
-	while idx < len(spool) loop
-		var elemType = getType(spool[idx])
-		if elemType == "array" then
-			var isHeader
-			var legendAtIdx
-			
-			// Is this a parameter header?
-			if getType(spool[idx][0][0]) != "array" then
-				isHeader = true
-				legendAtIdx = spool[idx]
-			else
-				isHeader = false
-				legendAtIdx = spool[idx][0]
-			endif
-			
-			var i
-			var j
-			
-			// Apply current spoolLegend to new spoolLegend
-			var spoolLegendEndIdx = len(spoolLegend) - 1
-			var legendResult = combineLegends(spoolLegend[spoolLegendEndIdx], legendAtIdx, _buildResult.tempoMap)
-			
-			spoolLegend[spoolLegendEndIdx] = legendResult.old
-			legendAtIdx = legendResult.new
-			
-			if isHeader then
-				spoolLegend = push(spoolLegend, [ .params = spool[idx][0], .len = len(subArr) - 1 ])
-			else
-				// Special case: parameter used to select audio clip
-				if getType(spool[idx][1]) == "array" then
-					var found = false
-					var instHeader = legendResult.old.params
-					
-					var i
-					for i = 0 to len(instHeader) loop
-						if instHeader[i][0] == spool[idx][1][0] then
-							spool[idx][1] = instHeader[i][1]
-							found = true
-						endif
-					repeat
-					
-					if !found then
-						debugPrint(999, [spool[idx][1][1] + " isn't a valid audio clip."])
-					endif
-				endif
-				
-				var subArr = getAudioClipByName(_buildResult.clips, spool[idx][1])
-				subArr = remove(subArr, 0) // Remove subArr's name entry
-				
-				legendResult = combineLegends([ .params = legendAtIdx, .len = 0 ], subArr[0], _buildResult.tempoMap) // Apply subArr's header
-				spoolLegend = push(spoolLegend, [ .params = legendResult.new, .len = len(subArr) - 1 ])
-				
-				spool = remove(spool, idx) // Remove reference entry
-				spool = insertArray(spool, subArr, idx) // Don't include header from subArr
-				
-				// Cull old spool entries occasionally to prevent reaching variable limit
-				if idx > 100 then
-					spool = splitEndOnly(spool, idx)
-					idx = 0
-				endif
-			endif
-		else if elemType == "struct" then
-			var parsedResult = parseSndData(spool[idx], recent, spoolLegend[len(spoolLegend) - 1].params, _buildResult.samples, 
-				_buildResult.tempoMap, -1, -1)
-			var parsed = parsedResult.parsed
-			recent = parsedResult.recent
-			
-			var queueStartIdx = len(queue) - 1
-			var i
-			for i = 0 to len(parsed) loop
-				var queueResult
-				
-				if i == 0 then
-					queueResult = addFirstQueuedSnd(parsed[i], queue, _buildResult.tempoMap)
-					totalPruned += queueResult.pruned
-					queue = queueResult.queue
-					
-					if queueResult.pruned then
-						array cleanQueue[len(queue) - queueResult.pruned]
-						var cleanIdx = 0
-						
-						var j
-						for j = 0 to len(queue) loop
-							if getType(queue[j]) == "struct" then
-								cleanQueue[cleanIdx] = queue[j]
-								cleanIdx += 1
-							endif
-						repeat
-						
-						queue = cleanQueue
-					endif
-				else
-					queueResult = addAdditionalQueuedSnd(parsed[i], queue, queueStartIdx, _buildResult.tempoMap)
-					queue = queueResult.queue
-				endif
-				
-				queueStartIdx = queueResult.idx
-				lastEventTime = getTimeFromTempoMap(_buildResult.tempoMap, parsed[i].beatPos) + parsed[i].timePos
-			repeat
-			
-			spoolLegend[len(spoolLegend) - 1].len -= 1
-		else // String
-			if str(spool[idx]) == "forceWrite" then
-				var split = split(queue, floor(lastClipRemaining + (len(queue) - lastClipRemaining) / 2))
-				
-				var cullResult = cullEventsInQueue(split[0], lastClipValues)
-				split[0] = cullResult.queue
-				lastClipValues = cullResult.lastClipValues
-				
-				fileInsertIdx = writeAudioSequence(_saveAsName, file, split[0], fileInsertIdx, false)
-				totalEvents += len(split[0])
-				lastClipRemaining = len(split[1])
-				queue = split[1]
-				
-				spoolLegend[len(spoolLegend) - 1].len -= 1
-			endif
-		endif endif
-		
-		// If we've passed the entries this spoolLegend applies to, remove it
-		if len(spoolLegend) then
-			while spoolLegend[len(spoolLegend) - 1].len <= 0 loop
-				spoolLegend = remove(spoolLegend, len(spoolLegend) - 1)
-				
-				if !len(spoolLegend) then break endif
-			repeat
-		endif
-		
-		idx += 1
-		
-		if time() >= timer + 0.1 then
-			elapsed += time() - timer
-			var prog = len(str(split(spool, idx + 1)[0]))
-			clear()
-			var sec = str(elapsed % 60)
-			
-			if len(sec) == 1 then
-				sec = "0" + sec
-			endif
-			
-			printAt(0, 0, "Assembling audio data. This may take a while.")
-			printAt(0, 2, "Elapsed: " + int(elapsed / 60) + ":" + sec)
-			if len(queue) then
-				printAt(0, 3, "Event: " + recent.lastFunc)
-				printAt(0, 4, "Beat position: " + str(recent.lastBeatPos))
-				printAt(0, 5, "Channel: " + str(recent.lastCh))
-				printAt(0, 6, "Queue length: " + len(queue))
-			endif
-			timer = time()
-			update()
-		endif
-	repeat
-	
-	if len(queue) then
-		queue = cullEventsInQueue(queue, lastClipValues).queue
-		writeAudioSequence(_saveAsName, file, queue, fileInsertIdx, false)
-		totalEvents += len(queue)
-	endif
-	
-	var sec = str(elapsed % 60)
-	if len(sec) == 1 then
-		sec = "0" + sec
-	endif
-	
-	close(file)
-	
-	playNote(0, 3, note2Freq(84), 0.5, 15, 0.5)
-	debugPrint(0, ["Audio assembly finished in " + int(elapsed / 60) + ":" + sec + "." + chr(10),
-		"Audio events written: " + totalEvents,
-		"Duplicate audio events pruned: " + totalPruned])
-return void
 
 // Stores the most recent events of each type.
 function updateRecentSnd(_recent, _lastParsed)
@@ -3562,7 +3884,7 @@ function updateSndQueue(ref _queue)
 			break
 		endif
 		
-		while time() + _queue.playheadOffset >= getTimeFromTempoMap(_queue.tempoMap, _queue.queue[_queue.queueIdx].beatPos) + _queue.queue[_queue.queueIdx].timePos loop
+		while time() + _queue.playheadOffset >= getTimeFromTempoMap(_queue.tempoMap, _queue.queue[_queue.queueIdx].beatPos, _queue.startTime) + _queue.queue[_queue.queueIdx].timePos loop
 			playQueuedSnd(_queue.queue[_queue.queueIdx], _queue.samples)
 			played = push(played, _queue.queue[_queue.queueIdx])
 			
@@ -3780,19 +4102,17 @@ return void
 	// READ/WRITE
 
 // Streams audio data from file.
-function streamAudioSequence(_name, _file, ref _queue, _actionLimit)
+function streamAudioSequence(_queue, _file, _actionLimit)
 	var loading = _queue.fileDat.block.idx != -1
 	var actionCount = 0
 	var chunk
 	
 	if !loading then
-		_queue.fileDat = [ .section = -1, .block = -1, .unit = -1, .field = -1, .elem = -1 ]
-		
-		var sectionIdx = findFileSection(_file, "audioSequence" + _name)
+		var sectionIdx = findFileSection(_file, "audioSequence" + _queue.name)
 		var chunkIdx = findFileChunk(_file, blockStr("events"), [ chr(31) ], sectionIdx.start, sectionIdx.end)
 		chunk = getNextFileChunk(_file, chunkIdx.start)
 		
-		_queue.fileDat.block = chunk
+		_queue.fileDat = [ .section = sectionIdx, .block = chunk, .unit = -1, .field = -1, .elem = -1 ]
 	else
 		chunk = _queue.fileDat.block
 	endif
@@ -3821,8 +4141,8 @@ function streamAudioSequence(_name, _file, ref _queue, _actionLimit)
 			chunk = getNextFileChunk(_file, chunk.nextIdx) // Field
 			_queue.fileDat.field = chunk
 			field = chunk.dat
-			
 			array elem[0]
+			
 			while inFileField(chunk) loop
 				chunk = getNextFileChunk(_file, chunk.nextIdx) // Elem
 				_queue.fileDat.elem = chunk
@@ -3849,8 +4169,19 @@ function streamAudioSequence(_name, _file, ref _queue, _actionLimit)
 		
 		sndGroup = push(sndGroup, newSnd)
 		actionCount += 1
+		
+		// If next idx overruns section bounds, the sequence is over
+		if _queue.fileDat.elem.nextIdx >= _queue.fileDat.section.end then
+			_queue.endedTime = time()
+			break
+		endif
 	repeat
-return sndGroup
+	
+	var result = [
+		.queue = _queue,
+		.elems = sndGroup
+	]
+return result
 
 // Loads a tempo map from the file.
 function readTempoMap(_name, _file)
